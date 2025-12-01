@@ -1,7 +1,3 @@
-/*
-  * - Core 0: Lê MPU6050 (Roll/Pitch) e envia via FIFO.
- * - Core 1: Recebe dados via FIFO e exibe no Display SSD1306.
- */
 
 #include <stdio.h>
 #include <string.h>
@@ -30,7 +26,7 @@
 #define DISP_ENDERECO 0x3C
 
 // Pino para o LED 
-#define LED_GPIO 12 // LED Azul 
+#define LED_GPIO 12// LED Azul 
 
 // Funções de baixo nível para o MPU6050
 // -------------------------------------------------
@@ -94,8 +90,9 @@ void core1_entry() {
     // Inicializa Display
     ssd1306_init(&ssd, WIDTH, HEIGHT, false, DISP_ENDERECO, I2C_PORT_DISP);
     ssd1306_config(&ssd);
+    ssd1306_dma_setup(I2C_PORT_DISP);
     ssd1306_fill(&ssd, false);
-    ssd1306_send_data(&ssd);
+    ssd1306_send_data_dma(&ssd);
 
     // Inicializa LED
     gpio_init(LED_GPIO); 
@@ -138,7 +135,7 @@ void core1_entry() {
         ssd1306_draw_string(&ssd, str_roll, 14, 52);
         ssd1306_draw_string(&ssd, str_pitch, 73, 52);
         
-        ssd1306_send_data(&ssd); // Envia o buffer para o display
+        ssd1306_send_data_dma(&ssd);
     }
 }
 

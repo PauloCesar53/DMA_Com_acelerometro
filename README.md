@@ -1,0 +1,3 @@
+"Anteriormente, o envio de dados para o display OLED era realizado inteiramente pela CPU (Core 1) através da função i2c_write_blocking, o que mantinha o processador ocupado durante toda a transmissão dos 1024 bytes de imagem.
+
+Na nova implementação, foi introduzido o DMA (Direct Memory Access). Agora, a CPU é responsável apenas por preparar o buffer de imagem (convertendo para 16 bits para incluir os comandos de controle I2C) e configurar o canal de DMA. Uma vez iniciado, o controlador DMA assume a transferência de dados da memória RAM diretamente para o periférico I2C de forma autônoma. Isso retira a carga de transferência de dados da CPU, permitindo uma comunicação mais eficiente e cumprindo o requisito de uso de periféricos avançados do microcontrolador RP2040."

@@ -1,5 +1,31 @@
 #include "ssd1306.h"
 #include "font.h"
+#include "hardware/dma.h"
+
+// Canal DMA 
+int dma_tx_chan;
+dma_channel_config dma_config;
+
+// Buffer auxiliar de 16 bits para garantir o protocolo correto do I2C
+// (Dado + Bits de Controle STOP/RESTART)
+static uint16_t i2c_dma_buffer[1025]; 
+
+void ssd1306_dma_setup(i2c_inst_t *i2c) {
+    // 1. Requisitar canal DMA livre 
+    dma_tx_chan = dma_claim_unused_channel(true);
+
+    // 2. Configurações gerais
+    dma_config = dma_channel_get_default_config(dma_tx_chan);
+    
+    // Usar 16 bits para enviar DADO + COMANDO juntos
+    channel_config_set_transfer_data_size(&dma_config, DMA_SIZE_16); 
+    
+    channel_config_set_read_increment(&dma_config, true);
+    channel_config_set_write_increment(&dma_config, false);
+    
+    // Pacing pelo I2C TX
+    channel_config_set_dreq(&dma_config, i2c_get_dreq(i2c, true)); 
+}
 
 void ssd1306_init(ssd1306_t *ssd, uint8_t width, uint8_t height, bool external_vcc, uint8_t address, i2c_inst_t *i2c) {
   ssd->width = width;
@@ -9,7 +35,7 @@ void ssd1306_init(ssd1306_t *ssd, uint8_t width, uint8_t height, bool external_v
   ssd->i2c_port = i2c;
   ssd->bufsize = ssd->pages * ssd->width + 1;
   ssd->ram_buffer = calloc(ssd->bufsize, sizeof(uint8_t));
-  ssd->ram_buffer[0] = 0x40;
+  ssd->ram_buffer[0] = 0x40; // Byte de controle (Co=0, D/C=1)
   ssd->port_buffer[0] = 0x80;
 }
 
@@ -52,20 +78,38 @@ void ssd1306_command(ssd1306_t *ssd, uint8_t command) {
   );
 }
 
-void ssd1306_send_data(ssd1306_t *ssd) {
-  ssd1306_command(ssd, SET_COL_ADDR);
-  ssd1306_command(ssd, 0);
-  ssd1306_command(ssd, ssd->width - 1);
-  ssd1306_command(ssd, SET_PAGE_ADDR);
-  ssd1306_command(ssd, 0);
-  ssd1306_command(ssd, ssd->pages - 1);
-  i2c_write_blocking(
-    ssd->i2c_port,
-    ssd->address,
-    ssd->ram_buffer,
-    ssd->bufsize,
-    false
-  );
+void ssd1306_send_data_dma(ssd1306_t *ssd) {
+    // 1. Envia comandos de posicionamento (via CPU, é rápido)
+    ssd1306_command(ssd, SET_COL_ADDR);
+    ssd1306_command(ssd, 0);
+    ssd1306_command(ssd, ssd->width - 1);
+    ssd1306_command(ssd, SET_PAGE_ADDR);
+    ssd1306_command(ssd, 0);
+    ssd1306_command(ssd, ssd->pages - 1);
+
+    // 2. PREPARAÇÃO DO BUFFER 
+    // Copia os dados de 8 bits para 16 bits.
+    // Isso garante que os bits 8..15 sejam ZERO (Modo Escrita).
+    for (size_t i = 0; i < ssd->bufsize; i++) {
+        i2c_dma_buffer[i] = ssd->ram_buffer[i];
+    }
+
+    // 3. ADICIONA O STOP BIT MANUALMENTE
+    // No último byte, ativamos o bit 9 (0x200), que sinaliza o fim da transmissão I2C.
+    i2c_dma_buffer[ssd->bufsize - 1] |= 0x200;
+
+    // 4. ENVIA TUDO VIA DMA (SEM GAPS!)
+    dma_channel_configure(
+        dma_tx_chan,
+        &dma_config,
+        &i2c_get_hw(ssd->i2c_port)->data_cmd, // Registrador de dados
+        i2c_dma_buffer,                       // Buffer preparado de 16 bits
+        ssd->bufsize,                         // Tamanho total
+        true                                  // Inicia agora
+    );
+
+    // Espera finalizar para não corromper o buffer na próxima volta
+    dma_channel_wait_for_finish_blocking(dma_tx_chan);
 }
 
 void ssd1306_pixel(ssd1306_t *ssd, uint8_t x, uint8_t y, bool value) {
@@ -77,23 +121,13 @@ void ssd1306_pixel(ssd1306_t *ssd, uint8_t x, uint8_t y, bool value) {
     ssd->ram_buffer[index] &= ~(1 << pixel);
 }
 
-/*
 void ssd1306_fill(ssd1306_t *ssd, bool value) {
-  uint8_t byte = value ? 0xFF : 0x00;
-  for (uint8_t i = 1; i < ssd->bufsize; ++i)
-    ssd->ram_buffer[i] = byte;
-}*/
-
-void ssd1306_fill(ssd1306_t *ssd, bool value) {
-    // Itera por todas as posições do display
     for (uint8_t y = 0; y < ssd->height; ++y) {
         for (uint8_t x = 0; x < ssd->width; ++x) {
             ssd1306_pixel(ssd, x, y, value);
         }
     }
 }
-
-
 
 void ssd1306_rect(ssd1306_t *ssd, uint8_t top, uint8_t left, uint8_t width, uint8_t height, bool value, bool fill) {
   for (uint8_t x = left; x < left + width; ++x) {
@@ -104,7 +138,6 @@ void ssd1306_rect(ssd1306_t *ssd, uint8_t top, uint8_t left, uint8_t width, uint
     ssd1306_pixel(ssd, left, y, value);
     ssd1306_pixel(ssd, left + width - 1, y, value);
   }
-
   if (fill) {
     for (uint8_t x = left + 1; x < left + width - 1; ++x) {
       for (uint8_t y = top + 1; y < top + height - 1; ++y) {
@@ -117,31 +150,23 @@ void ssd1306_rect(ssd1306_t *ssd, uint8_t top, uint8_t left, uint8_t width, uint
 void ssd1306_line(ssd1306_t *ssd, uint8_t x0, uint8_t y0, uint8_t x1, uint8_t y1, bool value) {
     int dx = abs(x1 - x0);
     int dy = abs(y1 - y0);
-
     int sx = (x0 < x1) ? 1 : -1;
     int sy = (y0 < y1) ? 1 : -1;
-
     int err = dx - dy;
-
     while (true) {
-        ssd1306_pixel(ssd, x0, y0, value); // Desenha o pixel atual
-
-        if (x0 == x1 && y0 == y1) break; // Termina quando alcança o ponto final
-
+        ssd1306_pixel(ssd, x0, y0, value);
+        if (x0 == x1 && y0 == y1) break;
         int e2 = err * 2;
-
         if (e2 > -dy) {
             err -= dy;
             x0 += sx;
         }
-
         if (e2 < dx) {
             err += dx;
             y0 += sy;
         }
     }
 }
-
 
 void ssd1306_hline(ssd1306_t *ssd, uint8_t x0, uint8_t x1, uint8_t y, bool value) {
   for (uint8_t x = x0; x <= x1; ++x)
@@ -153,47 +178,28 @@ void ssd1306_vline(ssd1306_t *ssd, uint8_t x, uint8_t y0, uint8_t y1, bool value
     ssd1306_pixel(ssd, x, y, value);
 }
 
-// Função para desenhar um caractere
-void ssd1306_draw_char(ssd1306_t *ssd, char c, uint8_t x, uint8_t y)
-{
+void ssd1306_draw_char(ssd1306_t *ssd, char c, uint8_t x, uint8_t y) {
   uint16_t index = 0;
-
-  // Verifica o caractere e calcula o índice correspondente na fonte
-  if (c >= ' ' && c <= '~') // Verifica se o caractere está na faixa ASCII válida
-  {
-    index = (c - ' ') * 8; // Calcula o índice baseado na posição do caractere na tabela ASCII
+  if (c >= ' ' && c <= '~') {
+    index = (c - ' ') * 8;
   }
-  else
-  {
-    // Caractere inválido, desenha um espaço (ou pode ser tratado de outra forma)
-    index = 0; // Índice 0 corresponde ao caractere "nada" (espaço)
-  }
-
-  // Desenha o caractere na tela
-  for (uint8_t i = 0; i < 8; ++i)
-  {
-    uint8_t line = font[index + i]; // Acessa a linha correspondente do caractere na fonte
-    for (uint8_t j = 0; j < 8; ++j)
-    {
-      ssd1306_pixel(ssd, x + i, y + j, line & (1 << j)); // Desenha cada pixel do caractere
+  for (uint8_t i = 0; i < 8; ++i) {
+    uint8_t line = font[index + i];
+    for (uint8_t j = 0; j < 8; ++j) {
+      ssd1306_pixel(ssd, x + i, y + j, line & (1 << j));
     }
   }
 }
 
-// Função para desenhar uma string
-void ssd1306_draw_string(ssd1306_t *ssd, const char *str, uint8_t x, uint8_t y)
-{
-  while (*str)
-  {
+void ssd1306_draw_string(ssd1306_t *ssd, const char *str, uint8_t x, uint8_t y) {
+  while (*str) {
     ssd1306_draw_char(ssd, *str++, x, y);
     x += 8;
-    if (x + 8 >= ssd->width)
-    {
+    if (x + 8 >= ssd->width) {
       x = 0;
       y += 8;
     }
-    if (y + 8 >= ssd->height)
-    {
+    if (y + 8 >= ssd->height) {
       break;
     }
   }
