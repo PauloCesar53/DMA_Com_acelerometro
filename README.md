@@ -183,6 +183,6 @@ float pitch = pitch_int / 100.0f;
 
 ## 🧾 Licença
 
-Distribuído sob **MIT License** — veja `LICENSE` para detalhes.
+Distribuído sob **MIT License** — veja [LICENSE](LICENSE) para detalhes.
 
 ---
