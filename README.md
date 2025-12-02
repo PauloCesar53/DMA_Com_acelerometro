@@ -4,7 +4,7 @@
 
 **DMA_Com_acelerometro** é um projeto demonstrativo para **Raspberry Pi Pico / Pico W** que lê um **MPU6050** (aceleração + giroscópio), calcula *roll* e *pitch* em **Core 0** e apresenta os valores em um **OLED SSD1306 128×64** no **Core 1**. A transmissão do framebuffer para o display foi otimizada com **DMA**, liberando CPU durante a transferência I²C dos ~1024 bytes de imagem.
 
-> Projeto mantido por **Heitor Rodrigues Lemos Dias** – Código aberto sob Licença MIT.
+
 
 ---
 
